@@ -1,5 +1,15 @@
 # ssh-web-console
 
+> **Security-maintained fork** of [genshen/ssh-web-console](https://github.com/genshen/ssh-web-console),
+> which has had no releases since 2022. Dependencies and toolchain are current
+> ([upstream PR #33](https://github.com/genshen/ssh-web-console/pull/33)), and the image is rebuilt
+> every week from fresh base images:
+>
+> ```bash
+> docker pull ghcr.io/hermanras/ssh-web-console:latest
+> docker run -v ${PWD}/conf:/home/web/conf -p 2222:2222 --rm ghcr.io/hermanras/ssh-web-console
+> ```
+
 you can connect to your linux machine by ssh in your browser.
 
 ![Docker Image Size (latest by date)](https://img.shields.io/docker/image-size/genshen/ssh-web-console?logo=docker&sort=date)

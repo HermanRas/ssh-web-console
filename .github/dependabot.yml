@@ -1,0 +1,16 @@
+# Fork-only. Keeps the FROM lines and Go modules current, alongside the weekly
+# no-cache image rebuild in .github/workflows/image.yml.
+version: 2
+updates:
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      # The frontend stage is held on Node 16 on purpose (react-scripts 4).
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly

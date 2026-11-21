@@ -1,0 +1,103 @@
+# Builds the ssh-web-console image, proves it serves the console and signs in to
+# a real sshd, and publishes it to GHCR as ghcr.io/hermanras/ssh-web-console
+# (:latest and :sha-<commit>). Nothing is pushed that has not first been
+# started and talked to. Fork-only: not part of the upstream pull request.
+name: image
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+  # Weekly, from scratch. A push-only build with the GHA layer cache reuses the
+  # package-upgrade layer until the Dockerfile changes, so OS security fixes never
+  # reach the image. This run pulls the bases again, skips the cache and publishes.
+  # (GitHub pauses schedules after 60 days without repository activity.)
+  schedule:
+    - cron: "11 4 * * 1"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Work out the image name
+        # Docker repository names must be lowercase; `HermanRas` is rejected.
+        run: |
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ssh-web-console" >> "$GITHUB_ENV"
+          echo "SOURCE=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" >> "$GITHUB_ENV"
+
+      - name: Build the image
+        uses: docker/build-push-action@v6
+        with:
+          pull: true
+          no-cache: ${{ github.event_name == 'schedule' }}
+          context: .
+          load: true
+          tags: ssh-web-console:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: It serves the console and signs in over SSH
+        run: |
+          fail() { echo "::error::$1"; docker logs sshweb; exit 1; }
+          docker network create e2e
+          docker run -d --name sshd --network e2e \
+            -e PASSWORD_ACCESS=true -e USER_NAME=tester -e USER_PASSWORD=ci-only-pass \
+            lscr.io/linuxserver/openssh-server:latest
+          docker run -d --name sshweb --network e2e -p 2222:2222 \
+            -v "$PWD/conf:/home/web/conf:ro" ssh-web-console:ci
+          for i in $(seq 1 20); do curl -fs -o /dev/null http://localhost:2222/ && break; sleep 1; done
+
+          # The frontend, embedded in the binary.
+          curl -fs http://localhost:2222/ | grep -q 'id="root"' || fail "/ did not serve the frontend"
+
+          # Wait for sshd, then a wrong password is refused and the right one gets a token.
+          for i in $(seq 1 30); do docker logs sshd 2>&1 | grep -q "Server listening" && break; sleep 1; done
+          signin() { curl -fs http://localhost:2222/api/signin -d host=sshd -d port=2222 -d username=tester -d "passwd=$1"; }
+          signin wrong | grep -q '"has_error":true' || fail "a wrong password was not refused"
+          signin ci-only-pass | grep -q '"has_error":false' || fail "sign-in to sshd failed"
+
+          # A token signed with another secret is refused.
+          forged='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJIb3N0Ijoic3NoZCIsIlBvcnQiOjIyMjJ9.c2lnbmF0dXJl'
+          code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:2222/api/sftp/ls?_t=$forged&cid=x&path=/")
+          [ "$code" = 400 ] || fail "a forged token answered $code"
+
+      - name: Tear down
+        if: always()
+        run: docker rm -f sshweb sshd || true
+
+      - name: Log in to GHCR
+        if: (github.event_name == 'push' || github.event_name == 'schedule') && github.ref == 'refs/heads/master'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push
+        if: (github.event_name == 'push' || github.event_name == 'schedule') && github.ref == 'refs/heads/master'
+        uses: docker/build-push-action@v6
+        with:
+          pull: true
+          context: .
+          push: true
+          # Links the package to this public repository, so it is public too.
+          labels: |
+            org.opencontainers.image.source=${{ env.SOURCE }}
+            org.opencontainers.image.description=SSH in the browser — security-maintained fork of genshen/ssh-web-console
+            org.opencontainers.image.licenses=MIT
+          # `latest` is what a host pulls; `sha-…` is what you pin to roll back.
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:sha-${{ github.sha }}
+          cache-from: type=gha
